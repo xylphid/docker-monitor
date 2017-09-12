@@ -3,6 +3,9 @@
 from abc import ABC, abstractmethod
 import argparse
 import docker
+import time
+import signal
+import sys
 try:
     import blinkt
     BLINKT = True
@@ -10,40 +13,67 @@ except RuntimeError:
     BLINKT = False
     print("Blinkt! is not plugged in...")
 
+class BlinktHelper:
+    colors = {
+        "initialize"    : {"r": 0, "g": 0, "b": 255, "brightness": 0.6},
+        "updating"      : {"r": 0, "g": 0, "b": 255, "brightness": 0.6},
+        # Show green lights when the following status occurs
+        "completed"     : {"r": 0, "g": 255, "b": 0, "brightness": 0.2},
+        "running"       : {"r": 0, "g": 255, "b": 0, "brightness": 0.2},
+        "ready"         : {"r": 0, "g": 255, "b": 0, "brightness": 0.2},
+        # Show orange lights when the following status occurs
+        "disconnected"  : {"r": 255, "g": 0, "b": 0, "brightness": 0.8},
+        "paused"        : {"r": 255, "g": 136, "b": 0, "brightness": 0.4},
+        "warning"       : {"r": 255, "g": 136, "b": 0, "brightness": 0.4},
+        # Show red lights when the following status occurs
+        "down"          : {"r": 255, "g": 0, "b": 0, "brightness": 0.8},
+        "exited"        : {"r": 255, "g": 0, "b": 0, "brightness": 0.8},
+        "stopped"       : {"r": 255, "g": 0, "b": 0, "brightness": 0.8},
+    }
+
+    @staticmethod
+    def reset_lights():
+        if BLINKT:
+            blinkt.set_all(0, 0, 0, 0)
+            blinkt.show()
+
+    @staticmethod
+    def set_light(position, status):
+        if BLINKT:
+            blinkt.set_pixel(position % blinkt.NUM_PIXELS, 
+                BlinktHelper.colors[status]["r"],
+                BlinktHelper.colors[status]["g"],
+                BlinktHelper.colors[status]["b"],
+                brightness=BlinktHelper.colors[status]["brightness"])
+            blinkt.show()
+
+    @staticmethod
+    def set_all(status):
+        if BLINKT:
+            blinkt.set_all(BlinktHelper.colors[status]["r"],
+                BlinktHelper.colors[status]["g"],
+                BlinktHelper.colors[status]["b"],
+                brightness=BlinktHelper.colors[status]["brightness"])
+            blinkt.show()
+
 class DockerHelper(ABC):
     def __init__(self, client=docker.from_env()):
         self.client = client
-        self.colors = {
-            "running"   : {"r": 0, "g": 255, "b": 0, "brightness": 0.2},
-            "paused"    : {"r": 255, "g": 136, "b": 0, "brightness": 0.4},
-            "warning"   : {"r": 255, "g": 136, "b": 0, "brightness": 0.4},
-            "stopped"   : {"r": 255, "g": 0, "b": 0, "brightness": 0.8},
-        }
         self.states = []
 
     def monitor(self):
         items = self.get_items()
         position = 0
 
-        if BLINKT:
-            blinkt.set_all(0, 0, 0, 0)
+        BlinktHelper.reset_lights()
 
         for item in items:
             status = self.get_status(item)
             self.states.append(status)
-            self.set_light(position, status["status"])
+            BlinktHelper.set_light(position, status["status"])
             position += 1
 
         return self.states
-
-    def set_light(self, position, status):
-        if BLINKT:
-            blinkt.set_pixel(position % blinkt.NUM_PIXELS, 
-                self.colors[status]["r"],
-                self.colors[status]["g"],
-                self.colors[status]["b"],
-                brightness=self.colors[status]["brightness"])
-            blinkt.show()
 
     @abstractmethod
     def get_items(self):
@@ -58,7 +88,10 @@ class ContainerHelper(DockerHelper):
         DockerHelper.__init__(self, client)
 
     def get_items(self):
-        return self.client.containers.list()
+        try:
+            return self.client.containers.list(all=True)
+        except:
+            return []
 
     def get_status(self, item):
         return {"name": item.name, "status": item.status}
@@ -111,22 +144,32 @@ class HealthManager:
 
 
 def main():
+    # React on signal
+    signal.signal(signal.SIGINT, terminate)
+    signal.signal(signal.SIGTERM, terminate)
+
+    # Define and parse arguments
     parser = argparse.ArgumentParser()
     parser.add_argument("--monitor", "-m", type=str, help="Monitor filter", choices=["services", "nodes", "containers"], default="containers")
     parser.add_argument("--delay", "-d", type=int, help="Healthcheck delay (seconds)", default=10)
     args = parser.parse_args()
 
     # Initialization : display blue leds
-    if BLINKT:
-        blinkt.set_all(0, 0, 255, 0.6)
-        blinkt.show()
-        time.sleep(5)
+    BlinktHelper.set_all("initialize")
+    time.sleep(5)
 
+    # Monitor loop
     while 1:
         watcher = HealthManager()
         watcher.monitor(module=args.monitor, delay=args.delay)
         time.sleep(args.delay)
         del watcher
+
+def terminate(signal, frame):
+    # Turn-off leds
+    BlinktHelper.reset_lights()
+    print( "Shutting down monitor..." )
+    sys.exit(0)
 
 if __name__ == "__main__":
     main()
